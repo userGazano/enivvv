@@ -1,4 +1,4 @@
-# bot.py — ИСПРАВЛЕННЫЙ
+# bot.py — ИСПРАВЛЕННЫЙ (без декоратора на handlers)
 
 import os
 import logging
@@ -35,26 +35,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ЗАЩИТА ====================
+# ==================== ПРОВЕРКА АДМИНА ====================
 
-def check_admin(func):
-    """Декоратор для проверки ADMIN_ID"""
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        
-        if user_id != ADMIN_ID:
-            logger.warning(f"❌ Unauthorized: {user_id}")
-            
-            if update.message:
-                await update.message.reply_text("❌ Access denied")
-            elif update.callback_query:
-                await update.callback_query.answer("❌ Access denied", show_alert=True)
-            
-            return
-        
-        return await func(update, context)
-    
-    return wrapper
+def is_admin(user_id: int) -> bool:
+    """Проверить админа"""
+    return user_id == ADMIN_ID
 
 # ==================== ПЕРЕМЕННЫЕ ====================
 
@@ -74,12 +59,10 @@ account_counter = 0
 # ==================== HELPER FUNCTIONS ====================
 
 def get_session_path(phone: str) -> str:
-    """Получить путь сессии"""
     clean_phone = phone.replace('+', '').replace(' ', '')
     return os.path.join(SESSIONS_DIR, f"account_{clean_phone}")
 
 def extract_code_from_text(text: str) -> Optional[str]:
-    """Парсить 5-значный код"""
     patterns = [
         r'(?:код|code)[\s:]*(\d{5})',
         r'(\d{5})\s+is\s+your',
@@ -94,7 +77,6 @@ def extract_code_from_text(text: str) -> Optional[str]:
 # ==================== TELETHON ====================
 
 async def request_code(account_id: int, phone: str) -> Tuple[bool, str]:
-    """Шаг 1: Отправить код"""
     try:
         session_path = get_session_path(phone)
         logger.info(f"🔐 Requesting code for {phone}")
@@ -132,7 +114,6 @@ async def request_code(account_id: int, phone: str) -> Tuple[bool, str]:
         return False, str(e)
 
 async def verify_code(phone: str, code: str) -> Tuple[bool, str]:
-    """Шаг 2: Проверить код"""
     if phone not in pending_auth:
         return False, "No pending code"
     
@@ -167,7 +148,6 @@ async def verify_code(phone: str, code: str) -> Tuple[bool, str]:
         return False, str(e)
 
 async def verify_2fa(phone: str, password: str) -> Tuple[bool, str]:
-    """Шаг 3: Проверить 2FA"""
     if phone not in pending_auth:
         return False, "No pending"
     
@@ -193,8 +173,6 @@ async def verify_2fa(phone: str, password: str) -> Tuple[bool, str]:
         return False, str(e)
 
 def start_listening(account_id: int, client: TelegramClient):
-    """Запустить слушатель"""
-    
     async def on_message(event):
         try:
             text = event.message.message
@@ -219,7 +197,6 @@ def start_listening(account_id: int, client: TelegramClient):
     logger.info(f"📡 Listening {account_id}")
 
 def get_code(account_id: int) -> Optional[str]:
-    """Получить код"""
     if account_id not in captured_codes:
         return None
     
@@ -236,9 +213,12 @@ def get_code(account_id: int) -> Optional[str]:
 
 # ==================== BOT HANDLERS ====================
 
-@check_admin
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Access denied")
+        return
+    
     keyboard = [
         [InlineKeyboardButton("➕ Add", callback_data='add_account')],
         [InlineKeyboardButton("📋 Accounts", callback_data='list_accounts')],
@@ -252,9 +232,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
 
-@check_admin
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Добавить аккаунт"""
+    if not is_admin(update.effective_user.id):
+        await update.callback_query.answer("❌ Access denied", show_alert=True)
+        return ConversationHandler.END
+    
     query = update.callback_query
     await query.answer()
     
@@ -266,13 +249,12 @@ async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return AUTH_PHONE
 
-@check_admin
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получить номер"""
     phone = update.message.text.strip()
     
     if not phone.startswith('+') or len(phone) < 10:
-        await update.message.reply_text("❌ Invalid:")
+        await update.message.reply_text("❌ Invalid format. Try again:")
         return AUTH_PHONE
     
     global account_counter
@@ -282,77 +264,74 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['phone'] = phone
     context.user_data['account_id'] = account_id
     
-    await update.message.reply_text(f"⏳ Sending...")
+    await update.message.reply_text(f"⏳ Sending code to {phone}...")
     
     success, message = await request_code(account_id, phone)
     
     if success:
         await update.message.reply_text(
             f"✅ {message}\n\n"
-            "📝 Enter code",
+            "📝 <b>Enter 5-digit code from SMS</b>",
             parse_mode='HTML'
         )
         return AUTH_CODE
     else:
-        await update.message.reply_text(f"❌ {message}")
+        await update.message.reply_text(f"❌ Error: {message}")
         return ConversationHandler.END
 
-@check_admin
 async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получить код"""
     code = update.message.text.strip()
     
     if not code.isdigit() or len(code) != 5:
-        await update.message.reply_text("❌ 5 digits:")
+        await update.message.reply_text("❌ Code must be 5 digits. Try again:")
         return AUTH_CODE
     
     phone = context.user_data['phone']
     account_id = context.user_data['account_id']
     
-    await update.message.reply_text("⏳ Checking...")
+    await update.message.reply_text("⏳ Verifying code...")
     
     success, message = await verify_code(phone, code)
     
     if success == True:
         await update.message.reply_text(
             f"✅ {message}\n\n"
-            "📝 Enter name",
+            "📝 <b>Enter account name</b>",
             parse_mode='HTML'
         )
         return ACCOUNT_NAME
     elif message == "2FA_REQUIRED":
         await update.message.reply_text(
-            "🔐 <b>2FA</b>\n\n"
-            "Enter password",
+            "🔐 <b>2FA required</b>\n\n"
+            "Enter your password:",
             parse_mode='HTML'
         )
         return AUTH_2FA
     else:
-        await update.message.reply_text(f"❌ {message}")
+        await update.message.reply_text(f"❌ Error: {message}")
         return ConversationHandler.END
 
-@check_admin
 async def receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получить 2FA"""
     password = update.message.text.strip()
     phone = context.user_data['phone']
     
-    await update.message.reply_text("⏳ Checking...")
+    await update.message.reply_text("⏳ Verifying 2FA...")
     
     success, message = await verify_2fa(phone, password)
     
     if success:
         await update.message.reply_text(
             f"✅ {message}\n\n"
-            "📝 Enter name",
+            "📝 <b>Enter account name</b>",
             parse_mode='HTML'
         )
         return ACCOUNT_NAME
     else:
-        await update.message.reply_text(f"❌ {message}")
+        await update.message.reply_text(f"❌ Error: {message}")
         return ConversationHandler.END
 
-@check_admin
 async def receive_account_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получить имя"""
     name = update.message.text.strip()
@@ -365,29 +344,33 @@ async def receive_account_name(update: Update, context: ContextTypes.DEFAULT_TYP
         'added_at': datetime.now()
     }
     
-    logger.info(f"✅ Added: {name}")
+    logger.info(f"✅ Account added: {name} ({phone})")
     
     await update.message.reply_text(
-        f"✅ <b>Done!</b>\n\n"
-        f"📝 {name}\n"
-        f"📱 {phone}",
+        f"✅ <b>Account added!</b>\n\n"
+        f"📝 Name: {name}\n"
+        f"📱 Phone: {phone}\n"
+        f"📡 Now listening for codes...",
         parse_mode='HTML'
     )
     
     context.user_data.clear()
     return ConversationHandler.END
 
-@check_admin
 async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Список аккаунтов"""
+    if not is_admin(update.effective_user.id):
+        await update.callback_query.answer("❌ Access denied", show_alert=True)
+        return
+    
     query = update.callback_query
     await query.answer()
     
     if not admin_accounts:
-        await query.edit_message_text("📭 Empty")
+        await query.edit_message_text("📭 No accounts yet")
         return
     
-    text = "📋 <b>Accounts:</b>\n\n"
+    text = "📋 <b>Your Accounts:</b>\n\n"
     keyboard = []
     
     for phone, data in admin_accounts.items():
@@ -395,7 +378,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         account_id = data['account_id']
         keyboard.append([
             InlineKeyboardButton(
-                f"Get - {data['name']}", 
+                f"Get Code - {data['name']}", 
                 callback_data=f"get_code_{account_id}"
             )
         ])
@@ -405,9 +388,12 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
-@check_admin
 async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получить код"""
+    if not is_admin(update.effective_user.id):
+        await update.callback_query.answer("❌ Access denied", show_alert=True)
+        return
+    
     query = update.callback_query
     await query.answer()
     
@@ -418,12 +404,13 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"✅ <b>CODE:</b>\n\n"
             f"<code>{code}</code>\n\n"
-            f"⏱️ 10min"
+            f"⏱️ Expires in 10 minutes"
         )
     else:
         text = (
-            f"⏳ <b>Waiting...</b>\n\n"
-            f"Enter phone in Telegram"
+            f"⏳ <b>Waiting for code...</b>\n\n"
+            f"Enter the phone number in Telegram,\n"
+            f"and the code will appear here."
         )
     
     keyboard = [
@@ -434,42 +421,49 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
-@check_admin
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Помощь"""
+    if not is_admin(update.effective_user.id):
+        await update.callback_query.answer("❌ Access denied", show_alert=True)
+        return
+    
     query = update.callback_query
     await query.answer()
     
     text = (
-        "❓ <b>How:</b>\n\n"
-        "1. Add Account\n"
-        "2. Enter phone\n"
-        "3. Enter code\n"
-        "4. 2FA password (if needed)\n"
-        "5. Enter name\n"
-        "6. My Accounts\n"
-        "7. Get Code"
+        "❓ <b>How to use:</b>\n\n"
+        "1️⃣ Click 'Add Account'\n"
+        "2️⃣ Enter phone number\n"
+        "3️⃣ Enter code from SMS\n"
+        "4️⃣ If 2FA - enter password\n"
+        "5️⃣ Enter account name\n"
+        "6️⃣ Go to 'My Accounts'\n"
+        "7️⃣ Click 'Get Code'\n"
+        "8️⃣ Bot will capture and show code"
     )
     
     keyboard = [[InlineKeyboardButton("◀️ Back", callback_data='back')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
-@check_admin
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Вернуться"""
+    """Вернуться в главное меню"""
+    if not is_admin(update.effective_user.id):
+        await update.callback_query.answer("❌ Access denied", show_alert=True)
+        return
+    
     query = update.callback_query
     await query.answer()
     
     keyboard = [
-        [InlineKeyboardButton("➕ Add", callback_data='add_account')],
-        [InlineKeyboardButton("📋 Accounts", callback_data='list_accounts')],
+        [InlineKeyboardButton("➕ Add Account", callback_data='add_account')],
+        [InlineKeyboardButton("📋 My Accounts", callback_data='list_accounts')],
         [InlineKeyboardButton("❓ Help", callback_data='help')]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
-        "🎯 <b>Account Manager</b>",
+        "🎯 <b>Telegram Account Manager</b>",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
@@ -502,7 +496,7 @@ def main():
     app.add_handler(CallbackQueryHandler(help_handler, pattern='help'))
     app.add_handler(CallbackQueryHandler(back_to_main, pattern='back'))
     
-    logger.info("✅ Ready")
+    logger.info("✅ Bot ready. Polling...")
     app.run_polling()
 
 if __name__ == '__main__':
