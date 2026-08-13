@@ -1,4 +1,4 @@
-# bot.py — основной бот
+# bot.py — ИСПРАВЛЕННЫЙ
 
 import os
 import logging
@@ -35,25 +35,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==================== ЗАЩИТА ====================
+
+def check_admin(func):
+    """Декоратор для проверки ADMIN_ID"""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        
+        if user_id != ADMIN_ID:
+            logger.warning(f"❌ Unauthorized: {user_id}")
+            
+            if update.message:
+                await update.message.reply_text("❌ Access denied")
+            elif update.callback_query:
+                await update.callback_query.answer("❌ Access denied", show_alert=True)
+            
+            return
+        
+        return await func(update, context)
+    
+    return wrapper
+
 # ==================== ПЕРЕМЕННЫЕ ====================
 
 Path(SESSIONS_DIR).mkdir(exist_ok=True)
 
-# {account_id: TelegramClient}
 active_clients: Dict[int, TelegramClient] = {}
-
-# {account_id: {code, timestamp, expires_at}}
 captured_codes: Dict[int, Dict] = {}
-
-# {phone: {client, hash, account_id}}
 pending_auth: Dict[str, Dict] = {}
-
-# Список аккаунтов админа {phone: {name, added_at}}
 admin_accounts: Dict[str, Dict] = {}
-
 account_counter = 0
 
-# States
 (
     AUTH_PHONE, AUTH_CODE, AUTH_2FA, 
     ACCOUNT_NAME
@@ -67,7 +79,7 @@ def get_session_path(phone: str) -> str:
     return os.path.join(SESSIONS_DIR, f"account_{clean_phone}")
 
 def extract_code_from_text(text: str) -> Optional[str]:
-    """Парсить 5-значный код из текста"""
+    """Парсить 5-значный код"""
     patterns = [
         r'(?:код|code)[\s:]*(\d{5})',
         r'(\d{5})\s+is\s+your',
@@ -79,10 +91,10 @@ def extract_code_from_text(text: str) -> Optional[str]:
             return match.group(1)
     return None
 
-# ==================== TELETHON: УПРАВЛЕНИЕ АККАУНТАМИ ====================
+# ==================== TELETHON ====================
 
 async def request_code(account_id: int, phone: str) -> Tuple[bool, str]:
-    """Шаг 1: Отправить код на номер через Telegram API"""
+    """Шаг 1: Отправить код"""
     try:
         session_path = get_session_path(phone)
         logger.info(f"🔐 Requesting code for {phone}")
@@ -90,7 +102,6 @@ async def request_code(account_id: int, phone: str) -> Tuple[bool, str]:
         client = TelegramClient(session_path, TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.connect()
         
-        # Проверить: может быть уже авторизован?
         if await client.is_user_authorized():
             logger.info(f"✅ Already authorized: {phone}")
             active_clients[account_id] = client
@@ -98,7 +109,6 @@ async def request_code(account_id: int, phone: str) -> Tuple[bool, str]:
             start_listening(account_id, client)
             return True, "Already authorized"
         
-        # Отправить код
         try:
             result = await client.send_code_request(phone)
             phone_code_hash = result.phone_code_hash
@@ -111,20 +121,20 @@ async def request_code(account_id: int, phone: str) -> Tuple[bool, str]:
             }
             
             logger.info(f"📨 Code sent to {phone}")
-            return True, f"Code sent to {phone}"
+            return True, f"Code sent"
             
         except FloodWaitError as e:
-            logger.error(f"❌ Flood wait: {e.seconds}s")
-            return False, f"Too many requests. Wait {e.seconds}s"
+            logger.error(f"❌ Flood: {e.seconds}s")
+            return False, f"Wait {e.seconds}s"
         
     except Exception as e:
         logger.error(f"❌ Error: {e}")
         return False, str(e)
 
 async def verify_code(phone: str, code: str) -> Tuple[bool, str]:
-    """Шаг 2: Ввести код подтверждения"""
+    """Шаг 2: Проверить код"""
     if phone not in pending_auth:
-        return False, "No pending code request"
+        return False, "No pending code"
     
     try:
         auth_data = pending_auth[phone]
@@ -132,15 +142,14 @@ async def verify_code(phone: str, code: str) -> Tuple[bool, str]:
         phone_code_hash = auth_data['phone_code_hash']
         account_id = auth_data['account_id']
         
-        logger.info(f"🔐 Verifying code {code} for {phone}")
+        logger.info(f"🔐 Verifying {code}")
         
         try:
             await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
             
-            logger.info(f"✅ Signed in successfully")
+            logger.info(f"✅ Signed in")
             
             me = await client.get_me()
-            logger.info(f"👤 User: {me.first_name}")
             
             active_clients[account_id] = client
             del pending_auth[phone]
@@ -148,31 +157,28 @@ async def verify_code(phone: str, code: str) -> Tuple[bool, str]:
             captured_codes[account_id] = {'code': None, 'timestamp': None, 'expires_at': None}
             start_listening(account_id, client)
             
-            return True, f"Authorized! User: {me.first_name}"
+            return True, f"OK! {me.first_name}"
             
         except SessionPasswordNeededError:
-            logger.info(f"🔐 2FA required for {phone}")
             return False, "2FA_REQUIRED"
             
     except Exception as e:
-        logger.error(f"❌ Verification error: {e}")
+        logger.error(f"❌ Error: {e}")
         return False, str(e)
 
 async def verify_2fa(phone: str, password: str) -> Tuple[bool, str]:
-    """Шаг 3: Ввести пароль 2FA"""
+    """Шаг 3: Проверить 2FA"""
     if phone not in pending_auth:
-        return False, "No pending verification"
+        return False, "No pending"
     
     try:
         auth_data = pending_auth[phone]
         client = auth_data['client']
         account_id = auth_data['account_id']
         
-        logger.info(f"🔐 Verifying 2FA for {phone}")
+        logger.info(f"🔐 2FA check")
         
         await client.sign_in(password=password)
-        
-        logger.info(f"✅ 2FA verified")
         
         active_clients[account_id] = client
         del pending_auth[phone]
@@ -180,17 +186,16 @@ async def verify_2fa(phone: str, password: str) -> Tuple[bool, str]:
         captured_codes[account_id] = {'code': None, 'timestamp': None, 'expires_at': None}
         start_listening(account_id, client)
         
-        return True, "2FA verified!"
+        return True, "2FA OK!"
         
     except Exception as e:
         logger.error(f"❌ 2FA error: {e}")
         return False, str(e)
 
 def start_listening(account_id: int, client: TelegramClient):
-    """Запустить слушатель кодов"""
+    """Запустить слушатель"""
     
     async def on_message(event):
-        """Обработчик входящих сообщений"""
         try:
             text = event.message.message
             if not text:
@@ -199,7 +204,7 @@ def start_listening(account_id: int, client: TelegramClient):
             code = extract_code_from_text(text)
             
             if code:
-                logger.info(f"🎯 [Account {account_id}] CODE FOUND: {code}")
+                logger.info(f"🎯 CODE: {code}")
                 
                 captured_codes[account_id] = {
                     'code': code,
@@ -208,13 +213,13 @@ def start_listening(account_id: int, client: TelegramClient):
                 }
                 
         except Exception as e:
-            logger.error(f"Message handler error: {e}")
+            logger.error(f"Error: {e}")
     
     client.add_event_handler(on_message, events.NewMessage(incoming=True))
-    logger.info(f"📡 [Account {account_id}] Listening for codes")
+    logger.info(f"📡 Listening {account_id}")
 
 def get_code(account_id: int) -> Optional[str]:
-    """Получить последний перехватанный код"""
+    """Получить код"""
     if account_id not in captured_codes:
         return None
     
@@ -224,55 +229,50 @@ def get_code(account_id: int) -> Optional[str]:
         return None
     
     if data['expires_at'] < datetime.now():
-        logger.warning(f"Code expired for account {account_id}")
         captured_codes[account_id]['code'] = None
         return None
     
     return data['code']
 
-# ==================== TELEGRAM BOT ====================
+# ==================== BOT HANDLERS ====================
 
+@check_admin
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню"""
-    user = update.effective_user
-    
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Access denied")
-        return
-    
     keyboard = [
-        [InlineKeyboardButton("➕ Добавить аккаунт", callback_data='add_account')],
-        [InlineKeyboardButton("📋 Мои аккаунты", callback_data='list_accounts')],
+        [InlineKeyboardButton("➕ Add", callback_data='add_account')],
+        [InlineKeyboardButton("📋 Accounts", callback_data='list_accounts')],
         [InlineKeyboardButton("❓ Help", callback_data='help')]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🎯 <b>Telegram Account Manager</b>\n\n"
-        "Управляй своими аккаунтами и получай коды.",
+        "🎯 <b>Account Manager</b>",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
 
+@check_admin
 async def add_account_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начать добавление аккаунта"""
+    """Добавить аккаунт"""
     query = update.callback_query
     await query.answer()
     
     await query.edit_message_text(
-        "📱 <b>Введите номер телефона</b>\n\n"
-        "Формат: +7XXXXXXXXXX или +1XXXXXXXXXX",
+        "📱 <b>Enter phone</b>\n\n"
+        "+7XXXXXXXXXX",
         parse_mode='HTML'
     )
     
     return AUTH_PHONE
 
+@check_admin
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получить номер и отправить код"""
+    """Получить номер"""
     phone = update.message.text.strip()
     
     if not phone.startswith('+') or len(phone) < 10:
-        await update.message.reply_text("❌ Invalid format. Try again:")
+        await update.message.reply_text("❌ Invalid:")
         return AUTH_PHONE
     
     global account_counter
@@ -282,76 +282,79 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['phone'] = phone
     context.user_data['account_id'] = account_id
     
-    await update.message.reply_text(f"⏳ Sending code to {phone}...")
+    await update.message.reply_text(f"⏳ Sending...")
     
     success, message = await request_code(account_id, phone)
     
     if success:
         await update.message.reply_text(
             f"✅ {message}\n\n"
-            "📝 <b>Введите 5-значный код из SMS</b>",
+            "📝 Enter code",
             parse_mode='HTML'
         )
         return AUTH_CODE
     else:
-        await update.message.reply_text(f"❌ Error: {message}")
+        await update.message.reply_text(f"❌ {message}")
         return ConversationHandler.END
 
+@check_admin
 async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получить и проверить код"""
+    """Получить код"""
     code = update.message.text.strip()
     
     if not code.isdigit() or len(code) != 5:
-        await update.message.reply_text("❌ Code must be 5 digits:")
+        await update.message.reply_text("❌ 5 digits:")
         return AUTH_CODE
     
     phone = context.user_data['phone']
     account_id = context.user_data['account_id']
     
-    await update.message.reply_text("⏳ Verifying code...")
+    await update.message.reply_text("⏳ Checking...")
     
     success, message = await verify_code(phone, code)
     
     if success == True:
         await update.message.reply_text(
             f"✅ {message}\n\n"
-            "📝 <b>Введите имя аккаунта</b>",
+            "📝 Enter name",
             parse_mode='HTML'
         )
         return ACCOUNT_NAME
     elif message == "2FA_REQUIRED":
         await update.message.reply_text(
-            "🔐 <b>2FA требуется</b>\n\n"
-            "Введите пароль для 2FA",
+            "🔐 <b>2FA</b>\n\n"
+            "Enter password",
             parse_mode='HTML'
         )
         return AUTH_2FA
     else:
-        await update.message.reply_text(f"❌ Error: {message}")
+        await update.message.reply_text(f"❌ {message}")
         return ConversationHandler.END
 
+@check_admin
 async def receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получить пароль 2FA"""
+    """Получить 2FA"""
     password = update.message.text.strip()
     phone = context.user_data['phone']
     
-    await update.message.reply_text("⏳ Verifying 2FA...")
+    await update.message.reply_text("⏳ Checking...")
     
     success, message = await verify_2fa(phone, password)
     
     if success:
         await update.message.reply_text(
             f"✅ {message}\n\n"
-            "📝 <b>Введите имя аккаунта</b>",
+            "📝 Enter name",
             parse_mode='HTML'
         )
         return ACCOUNT_NAME
     else:
-        await update.message.reply_text(f"❌ Error: {message}")
+        await update.message.reply_text(f"❌ {message}")
         return ConversationHandler.END
 
+@check_admin
 async def receive_account_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получить имя аккаунта и сохранить"""
+    """Получить имя"""
     name = update.message.text.strip()
     phone = context.user_data['phone']
     account_id = context.user_data['account_id']
@@ -362,29 +365,29 @@ async def receive_account_name(update: Update, context: ContextTypes.DEFAULT_TYP
         'added_at': datetime.now()
     }
     
-    logger.info(f"✅ Account added: {name} ({phone})")
+    logger.info(f"✅ Added: {name}")
     
     await update.message.reply_text(
-        f"✅ <b>Account added!</b>\n\n"
-        f"📝 Name: {name}\n"
-        f"📱 Phone: {phone}\n"
-        f"📡 Listening for codes...",
+        f"✅ <b>Done!</b>\n\n"
+        f"📝 {name}\n"
+        f"📱 {phone}",
         parse_mode='HTML'
     )
     
     context.user_data.clear()
     return ConversationHandler.END
 
+@check_admin
 async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Список аккаунтов"""
     query = update.callback_query
     await query.answer()
     
     if not admin_accounts:
-        await query.edit_message_text("📭 No accounts yet")
+        await query.edit_message_text("📭 Empty")
         return
     
-    text = "📋 <b>Your Accounts:</b>\n\n"
+    text = "📋 <b>Accounts:</b>\n\n"
     keyboard = []
     
     for phone, data in admin_accounts.items():
@@ -392,36 +395,35 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         account_id = data['account_id']
         keyboard.append([
             InlineKeyboardButton(
-                f"Get Code - {data['name']}", 
+                f"Get - {data['name']}", 
                 callback_data=f"get_code_{account_id}"
             )
         ])
     
-    keyboard.append([InlineKeyboardButton("◀️ Back", callback_data='back_to_main')])
+    keyboard.append([InlineKeyboardButton("◀️ Back", callback_data='back')])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
+@check_admin
 async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получить код по кнопке"""
+    """Получить код"""
     query = update.callback_query
     await query.answer()
     
     account_id = int(query.data.split('_')[2])
-    
     code = get_code(account_id)
     
     if code:
         text = (
             f"✅ <b>CODE:</b>\n\n"
             f"<code>{code}</code>\n\n"
-            f"⏱️ Expires in 10 minutes"
+            f"⏱️ 10min"
         )
     else:
         text = (
-            f"⏳ <b>Waiting for code...</b>\n\n"
-            f"Enter the phone number in Telegram,\n"
-            f"and the code will appear here."
+            f"⏳ <b>Waiting...</b>\n\n"
+            f"Enter phone in Telegram"
         )
     
     keyboard = [
@@ -432,54 +434,54 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
+@check_admin
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Помощь"""
     query = update.callback_query
     await query.answer()
     
     text = (
-        "❓ <b>How to use:</b>\n\n"
-        "1️⃣ Click 'Add Account'\n"
-        "2️⃣ Enter phone number\n"
-        "3️⃣ Enter code from SMS\n"
-        "4️⃣ If 2FA - enter password\n"
-        "5️⃣ Enter account name\n"
-        "6️⃣ Go to 'My Accounts'\n"
-        "7️⃣ Click 'Get Code'\n"
-        "8️⃣ Bot will capture and show code"
+        "❓ <b>How:</b>\n\n"
+        "1. Add Account\n"
+        "2. Enter phone\n"
+        "3. Enter code\n"
+        "4. 2FA password (if needed)\n"
+        "5. Enter name\n"
+        "6. My Accounts\n"
+        "7. Get Code"
     )
     
-    keyboard = [[InlineKeyboardButton("◀️ Back", callback_data='back_to_main')]]
+    keyboard = [[InlineKeyboardButton("◀️ Back", callback_data='back')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
 
+@check_admin
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Вернуться в главное меню"""
+    """Вернуться"""
     query = update.callback_query
     await query.answer()
     
     keyboard = [
-        [InlineKeyboardButton("➕ Add Account", callback_data='add_account')],
-        [InlineKeyboardButton("📋 My Accounts", callback_data='list_accounts')],
+        [InlineKeyboardButton("➕ Add", callback_data='add_account')],
+        [InlineKeyboardButton("📋 Accounts", callback_data='list_accounts')],
         [InlineKeyboardButton("❓ Help", callback_data='help')]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
-        "🎯 <b>Telegram Account Manager</b>",
+        "🎯 <b>Account Manager</b>",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
 
 # ==================== ЗАПУСК ====================
 
-async def main():
-    """Запуск бота"""
+def main():
+    """Запуск БЕЗ asyncio.run()"""
     logger.info("🚀 Bot starting...")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Conversation handler
     add_account_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_account_start, pattern='add_account')],
         states={
@@ -489,6 +491,7 @@ async def main():
             ACCOUNT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account_name)],
         },
         fallbacks=[],
+        per_message=True
     )
     
     app.add_handler(CommandHandler('start', start))
@@ -497,10 +500,10 @@ async def main():
     app.add_handler(CallbackQueryHandler(list_accounts, pattern='list_accounts'))
     app.add_handler(CallbackQueryHandler(get_code_button, pattern='get_code_'))
     app.add_handler(CallbackQueryHandler(help_handler, pattern='help'))
-    app.add_handler(CallbackQueryHandler(back_to_main, pattern='back_to_main'))
+    app.add_handler(CallbackQueryHandler(back_to_main, pattern='back'))
     
-    logger.info("✅ Bot ready")
-    await app.run_polling()
+    logger.info("✅ Ready")
+    app.run_polling()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
