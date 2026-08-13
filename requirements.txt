@@ -1,0 +1,5 @@
+# requirements.txt
+
+python-telegram-bot==20.3
+telethon==1.30.0
+python-dotenv==1.0.0
