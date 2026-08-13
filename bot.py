@@ -1,4 +1,4 @@
-# bot.py — ПОЛНЫЙ КОД
+# bot.py — ИСПРАВЛЕННЫЙ (добавлены fallbacks и обработчик вне conv)
 
 import os
 import logging
@@ -480,6 +480,14 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
 
+async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена ConversationHandler"""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await back_to_main(update, context)
+    return ConversationHandler.END
+
 # ==================== ЗАПУСК ====================
 
 def main():
@@ -497,13 +505,17 @@ def main():
             AUTH_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_2fa)],
             ACCOUNT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account_name)],
         },
-        fallbacks=[],
+        fallbacks=[
+            CallbackQueryHandler(cancel_conv, pattern='back'),
+            CommandHandler('cancel', cancel_conv)
+        ],
     )
     
     # Регистрация обработчиков
     app.add_handler(CommandHandler('start', start))
     app.add_handler(add_account_conv)
     
+    # ЭТИ ОБРАБОТЧИКИ ДОЛЖНЫ БЫТЬ ПОСЛЕ ConversationHandler!
     app.add_handler(CallbackQueryHandler(list_accounts, pattern='list_accounts'))
     app.add_handler(CallbackQueryHandler(get_code_button, pattern='get_code_'))
     app.add_handler(CallbackQueryHandler(help_handler, pattern='help'))
