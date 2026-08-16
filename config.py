@@ -1,29 +1,14 @@
-# ==============================
-# Telegram Bot
-# ==============================
+# config.py
 
-BOT_TOKEN = "PASTE_BOT_TOKEN_HERE"
-ADMIN_ID = 123456789
+import os
 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# ==============================
-# Telegram API
-# ==============================
+TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 
-TELEGRAM_API_ID = 123456
-TELEGRAM_API_HASH = "PASTE_API_HASH_HERE"
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-
-# ==============================
-# PostgreSQL / Railway
-# ==============================
-
-DATABASE_URL = "PASTE_RAILWAY_POSTGRES_URL_HERE"
-
-
-# ==============================
-# Paths
-# ==============================
-
-SESSIONS_DIR = "./sessions"
-LOGS_DIR = "./logs"
+SESSIONS_DIR = os.getenv("SESSIONS_DIR", "./sessions")
+LOGS_DIR = os.getenv("LOGS_DIR", "./logs")
